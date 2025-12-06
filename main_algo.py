@@ -1,3 +1,5 @@
+#EE274 - Marc Moussa Nasser
+
 import numpy as np
 import cvxpy as cp
 import matplotlib.pyplot as plt
@@ -8,6 +10,11 @@ import matplotlib.pyplot as plt
 # core convex optimization routines
 
 def convex_solve_rd(D_target,n,m,pX,Dmat):
+    '''
+    This function solves the convex optimization problem for rate-distortion
+    optimization using cvxpy. It minimizes the mutual information I(X;Y) subject 
+    to an average distortion constraint. It does not include fidelity constraints.
+    '''
     Q = cp.Variable((n, m), nonneg=True)     
     pY = cp.Variable(m, nonneg=True)
     constraints = [cp.sum(Q, axis=1) == 1]
@@ -31,6 +38,12 @@ def convex_solve_rd(D_target,n,m,pX,Dmat):
     }
 
 def convex_solve_rd_with_fidelity(D_target,n,m,pX,Dmat,Dprime=None, subset_idx=None):
+    '''
+    This function solves the convex optimization problem for rate-distortion
+    optimization using cvxpy. It minimizes the mutual information I(X;Y) subject 
+    to an average distortion constraint and an additional fidelity constraint on
+    a specified subset of the source symbols.
+    '''
     Q = cp.Variable((n, m), nonneg=True)
     pY = cp.Variable(m, nonneg=True)
     constraints = [cp.sum(Q, axis=1) == 1]
@@ -69,66 +82,16 @@ def convex_solve_rd_with_fidelity(D_target,n,m,pX,Dmat,Dprime=None, subset_idx=N
     return res
 
 
-def convex_solve_rd_with_fidelity_tau(D_target, n, m, pX, Dmat,
-                                      Dprime=None, subset_idx=None,
-                                      tau=0.0):
-
-    Q = cp.Variable((n, m), nonneg=True)
-    pY = cp.Variable(m, nonneg=True)
-
-    constraints = [cp.sum(Q, axis=1) == 1]          
-    constraints += [pY == (pX @ Q)]                
-
-    avg_distortion = cp.sum(cp.multiply(pX,
-                                        cp.sum(cp.multiply(Q, Dmat), axis=1)))
-    constr_D_global = (avg_distortion <= D_target)
-    constraints += [constr_D_global]
-
-    constr_D_subset = None
-    if subset_idx is not None and Dprime is not None:
-        subset_idx = np.array(subset_idx, dtype=int)
-        px_subset = pX[subset_idx]
-        Q_subset = Q[subset_idx, :]
-        Dmat_subset = Dmat[subset_idx, :]
-
-        avg_distortion_subset = cp.sum(
-            cp.multiply(px_subset,
-                        cp.sum(cp.multiply(Q_subset, Dmat_subset), axis=1))
-        )
-        constr_D_subset = (avg_distortion_subset <= Dprime)
-        constraints += [constr_D_subset]
-
-    I_terms = cp.rel_entr(Q, cp.vstack([pY] * n))
-    mutual_info = cp.sum(cp.multiply(pX, cp.sum(I_terms, axis=1)))
-
-    H_cond = cp.sum(cp.multiply(pX[:, None], cp.entr(Q)))
-
-
-    objective = mutual_info - tau * H_cond
-    problem = cp.Problem(cp.Minimize(objective), constraints)
-    problem.solve()
-
-    res = {
-        "status": problem.status,
-        "I_opt": mutual_info.value,          
-        "D_achieved": avg_distortion.value,
-        "Q": Q.value,
-        "pY": pY.value,
-        "dual_D_global": constr_D_global.dual_value,
-        "H_cond": H_cond.value,
-        "tau": tau,
-    }
-    if constr_D_subset is not None:
-        res["dual_D_subset"] = constr_D_subset.dual_value
-    else:
-        res["dual_D_subset"] = None
-
-    return res
 
 #---------------------------------------------------
 #updating codebook
 
 def update_codebook_centroids(X, pX, Q, mass_tol=1e-12):
+    '''
+    This function updates the codebook centroids based on the current
+    assignment probabilities Q and source distribution pX. It assumes squared
+    Euclidean distortion measure.
+    '''
     if X.ndim == 1:
         X = X[:, None]   
 
@@ -150,6 +113,10 @@ def update_codebook_centroids(X, pX, Q, mass_tol=1e-12):
 
 #merging
 def merge_small_codewords(Y, pY, mass_threshold=1e-3, dist_threshold=1e-3):
+    '''
+    This function merges codewords in the codebook Y that have small mass
+    (less than mass_threshold) or are close to each other (within dist_threshold).
+    The merging is done by combining the centroids weighted by their masses.'''
     Y = np.array(Y, copy=True)
     pY = np.array(pY, copy=True)
     m = len(pY)
@@ -191,45 +158,16 @@ def merge_small_codewords(Y, pY, mass_threshold=1e-3, dist_threshold=1e-3):
 
 
 #---------------------------------------------------
-# main
+# main algorithm
 
-def init_Q_nearest(xs, ys):
-    xs_arr = np.asarray(xs)
-    ys_arr = np.asarray(ys)
-
-    if xs_arr.ndim == 1:
-        xs_arr = xs_arr[:, None]
-    if ys_arr.ndim == 1:
-        ys_arr = ys_arr[:, None]
-
-    n = xs_arr.shape[0]
-    m = ys_arr.shape[0]
-
-    Dmat = squared_euclidean_Dmat(xs_arr, ys_arr)  
-    nn_idx = np.argmin(Dmat, axis=1)               
-    Q = np.zeros((n, m))
-    Q[np.arange(n), nn_idx] = 1.0
-    return Q, Dmat
-
-
-def compute_metrics_from_Q(Q, pX, Dmat, eps=1e-12):
-    Q_clipped = np.clip(Q, eps, 1.0)
-    pY = pX @ Q_clipped
-
-    pY_clipped = np.clip(pY, eps, 1.0)
-
-
-    H_Y = -np.sum(pY_clipped * np.log(pY_clipped))
-    H_Y_given_X = -np.sum(pX[:, None] * Q_clipped * np.log(Q_clipped))
-
-    I_emp = H_Y - H_Y_given_X
-
-    avg_distortion = np.sum(pX * np.sum(Q * Dmat, axis=1))
-
-    return H_Y, H_Y_given_X, I_emp, avg_distortion
-
-def run_main(ys, xs, pX, num_iters=10, tol=1e-6,
-             Dprime=0.6, D_target=0.6, subset_idx=None):
+def run_main(ys, xs, pX, num_iters=10, tol=1e-6, Dprime=0.6, D_target=0.6, subset_idx=None):
+    '''
+    This function runs the main iterative algorithm for lossy data compression
+    using a convex optimization approach. It updates the codebook centroids,
+    assignment probabilities, and computes information-theoretic metrics
+    over multiple iterations until convergence or a maximum number of iterations
+    is reached.
+    '''
 
     X = np.asarray(xs)
     if X.ndim == 1:
@@ -325,7 +263,57 @@ def run_main(ys, xs, pX, num_iters=10, tol=1e-6,
 
 #---------------------------------------------------
 # helpers
+
+def init_Q_nearest(xs, ys):
+    '''
+    This function initializes the assignment probability matrix Q by assigning
+    each source symbol to its nearest codeword in terms of squared Euclidean
+    distance.
+    '''
+    xs_arr = np.asarray(xs)
+    ys_arr = np.asarray(ys)
+
+    if xs_arr.ndim == 1:
+        xs_arr = xs_arr[:, None]
+    if ys_arr.ndim == 1:
+        ys_arr = ys_arr[:, None]
+
+    n = xs_arr.shape[0]
+    m = ys_arr.shape[0]
+
+    Dmat = squared_euclidean_Dmat(xs_arr, ys_arr)  
+    nn_idx = np.argmin(Dmat, axis=1)               
+    Q = np.zeros((n, m))
+    Q[np.arange(n), nn_idx] = 1.0
+    return Q, Dmat
+
+
+def compute_metrics_from_Q(Q, pX, Dmat, eps=1e-12):
+    '''
+    This function computes various information-theoretic metrics from the
+    assignment probability matrix Q, source distribution pX, and distortion
+    matrix Dmat.
+    '''
+    Q_clipped = np.clip(Q, eps, 1.0)
+    pY = pX @ Q_clipped
+
+    pY_clipped = np.clip(pY, eps, 1.0)
+
+
+    H_Y = -np.sum(pY_clipped * np.log(pY_clipped))
+    H_Y_given_X = -np.sum(pX[:, None] * Q_clipped * np.log(Q_clipped))
+
+    I_emp = H_Y - H_Y_given_X
+
+    avg_distortion = np.sum(pX * np.sum(Q * Dmat, axis=1))
+
+    return H_Y, H_Y_given_X, I_emp, avg_distortion
+
 def squared_euclidean_Dmat(X, Y):
+    '''
+    This function computes the squared Euclidean distance matrix between two sets
+    of vectors X and Y.
+    '''
     if X.ndim == 1:
         X = X[:, None]
     if Y.ndim == 1:
@@ -334,11 +322,19 @@ def squared_euclidean_Dmat(X, Y):
     return np.sum(diff**2, axis=2)
 
 def mahalanobis_Dmat(X, Y, W):
+    '''
+    This function computes the Mahalanobis distance matrix between two sets
+    of vectors X and Y, given a weight matrix W.
+    '''
     diff = X[:, None, :] - Y[None, :, :]
     tmp = diff @ W
     return np.sum(tmp * diff, axis=2)
 
 def compute_entropies_from_solution(res, pX, eps=1e-12):
+    '''
+    This function computes various entropy-related metrics from the solution
+    dictionary `res` and source distribution `pX`.
+    '''
     Q = res["Q"]
     pY = res["pY"]
     Q_clipped = np.clip(Q, eps, 1.0)
@@ -358,6 +354,11 @@ def compute_entropies_from_solution(res, pX, eps=1e-12):
 # RD curve routines
 
 def run_rd_curve(pX, Dmat, D_targets):
+    '''
+    This function runs the rate-distortion curve computation for a given source
+    distribution pX, distortion matrix Dmat, and a list of target distortions
+    D_targets.
+    '''
     n, m = Dmat.shape
     I_vals = []
     D_vals = []
@@ -374,6 +375,12 @@ def run_rd_curve(pX, Dmat, D_targets):
     return np.array(D_vals), np.array(I_vals)
 
 def run_rd_curve_with_fidelity(pX, Dmat, D_targets, Dprime, subset_idx):
+    '''
+    This function runs the rate-distortion curve computation with an additional
+    fidelity constraint for a given source distribution pX, distortion matrix Dmat,
+    a list of target distortions D_targets, fidelity constraint Dprime, and subset
+    indices subset_idx.
+    '''
     n, m = Dmat.shape
     D_vals = []
     I_vals = []
@@ -381,9 +388,7 @@ def run_rd_curve_with_fidelity(pX, Dmat, D_targets, Dprime, subset_idx):
     dual_subset_vals = []
 
     for D_target in D_targets:
-        res = convex_solve_rd_with_fidelity(D_target, n, m, pX, Dmat,
-                                             subset_idx=subset_idx,
-                                             Dprime=Dprime)
+        res = convex_solve_rd_with_fidelity(D_target, n, m, pX, Dmat, subset_idx=subset_idx,Dprime=Dprime)
         if res["status"] not in ["optimal", "optimal_inaccurate"]:
             D_vals.append(np.nan)
             I_vals.append(np.nan)
@@ -401,26 +406,6 @@ def run_rd_curve_with_fidelity(pX, Dmat, D_targets, Dprime, subset_idx):
             np.array(dual_global_vals),
             np.array(dual_subset_vals))
     
-def run_tau_sensitivity(pX, Dmat, D_target, Dprime, subset_idx, taus):
-    H_Y_list = []
-    H_YX_list = []
-    I_list = []
-    n, m = Dmat.shape
-
-    for tau in taus:
-        res_tau = convex_solve_rd_with_fidelity_tau(
-            D_target, n, m, pX, Dmat,
-            Dprime=Dprime,
-            subset_idx=subset_idx,
-            tau=tau
-        )
-        ents = compute_entropies_from_solution(res_tau, pX)
-        H_Y_list.append(ents["H_Y"])
-        H_YX_list.append(ents["H_Y_given_X"])
-        I_list.append(ents["I_emp"])
-        
-    return I_list, H_Y_list, H_YX_list
-        
         
     
 
@@ -428,6 +413,10 @@ def run_tau_sensitivity(pX, Dmat, D_target, Dprime, subset_idx, taus):
 # plotting routines
 
 def plot_rd_curve(D_vals, I_vals, title="Rate–Distortion Curve"):
+    '''
+    This function plots the rate-distortion curve given distortion values D_vals
+    and mutual information values I_vals.
+    '''
     R_bits = I_vals / np.log(2)
     plt.figure(figsize=(4, 3))
     plt.plot(D_vals, R_bits, marker='.', color='purple')
@@ -438,6 +427,10 @@ def plot_rd_curve(D_vals, I_vals, title="Rate–Distortion Curve"):
     plt.show()
     
 def plot_rd_curve_with_fidelity(D_vals, I_vals, title="Rate–Distortion Curve with Fidelity Constraint"):
+    '''
+    This function plots the rate-distortion curve with fidelity constraint given distortion values D_vals
+    and mutual information values I_vals.
+    '''
     R_bits = I_vals / np.log(2)
     plt.figure(figsize=(4, 3))
     plt.plot(D_vals, R_bits, marker='.', color='green')
@@ -448,8 +441,10 @@ def plot_rd_curve_with_fidelity(D_vals, I_vals, title="Rate–Distortion Curve w
     plt.show()
 
 
-def plot_dual_sensitivity(D_vals, dual_global, dual_subset,
-                          title="Dual sensitivity vs distortion"):
+def plot_dual_sensitivity(D_vals, dual_global, dual_subset, title="Dual sensitivity vs distortion"):
+    '''
+    This function plots the dual sensitivity values against the achieved average distortion.
+    '''
     plt.figure(figsize=(4, 3))
     plt.plot(D_vals, dual_global, marker='o', label=r"$\lambda_{\mathrm{global}}$")
     plt.plot(D_vals, dual_subset, marker='s', label=r"$\lambda_{\mathrm{subset}}$")
@@ -461,6 +456,10 @@ def plot_dual_sensitivity(D_vals, dual_global, dual_subset,
     plt.show()
 
 def plot_mains(I_list, D_list, H_Y_list, H_YX_list, m_list, D_target):
+    '''
+    This function plots the main information quantities, distortion, and codebook size
+    against the outer iteration number.
+    '''
     iters = np.arange(len(I_list))
     fig, axes = plt.subplots(1, 3, figsize=(12, 3))
 
